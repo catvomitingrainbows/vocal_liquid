@@ -4,7 +4,7 @@ A macOS menu bar application for quick audio transcription using Whisper.
 
 ## Features
 
-- Records audio between hotkey presses (default: Command-Shift-R to start/stop)
+- Records audio between hotkey presses (default: Option-Shift-T to start/stop)
 - Automatically transcribes recorded audio using Whisper
 - Copies transcription to clipboard
 - Visual indicator when recording is active
@@ -34,9 +34,9 @@ A macOS menu bar application for quick audio transcription using Whisper.
 
 1. Launch VocalLiquid from Applications or have it start automatically at login
 2. The app will appear as a small waveform icon in your menu bar
-3. Press Command-Shift-R to start recording
+3. Press Option-Shift-T to start recording
 4. The icon will turn orange while recording (along with a system microphone indicator)
-5. Press Command-Shift-R again to stop recording
+5. Press Option-Shift-T again to stop recording
 6. After a brief processing delay, the transcribed text will be copied to your clipboard
 7. You'll receive a notification when transcription is complete
 

@@ -225,7 +225,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                     // Already have permission, show notification directly
                     self.showNotification(
                         title: "VocalLiquid Ready",
-                        body: "Press Command-Shift-R to start/stop recording.",
+                        body: "Press Option-Shift-T to start/stop recording.",
                         type: "app_launch"
                     )
                 } else if !self.shouldSkipPermissions {
@@ -234,7 +234,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                         if granted {
                             self.showNotification(
                                 title: "VocalLiquid Ready",
-                                body: "Press Command-Shift-R to start/stop recording.",
+                                body: "Press Option-Shift-T to start/stop recording.",
                                 type: "app_launch"
                             )
                         }
@@ -242,7 +242,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 }
             }
             print("VocalLiquid is running in background mode")
-            self.logger.log(message: "VocalLiquid ready - using Command-Shift-R hotkey", level: .info)
+            self.logger.log(message: "VocalLiquid ready - using Option-Shift-T hotkey", level: .info)
         }
     }
     
@@ -316,7 +316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             if isRec {
                 showNotification(
                     title: "Recording Started",
-                    body: "Speak now. Press Command-Shift-R to stop.",
+                    body: "Speak now. Press Option-Shift-T to stop.",
                     type: "recording_status",
                     force: true
                 )

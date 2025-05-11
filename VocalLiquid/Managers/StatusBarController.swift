@@ -92,7 +92,7 @@ class StatusBarController {
         statusBarMenu.addItem(NSMenuItem.separator())
 
         // Add recording shortcut info
-        let shortcutItem = NSMenuItem(title: "Shortcut: ⌘⇧R", action: nil, keyEquivalent: "")
+        let shortcutItem = NSMenuItem(title: "Shortcut: ⌥⇧T", action: nil, keyEquivalent: "")
         shortcutItem.isEnabled = false
         statusBarMenu.addItem(shortcutItem)
 
@@ -127,10 +127,11 @@ class StatusBarController {
     }
     
     private func setupHotkeys() {
-        print("DEBUG: Setting up hotkeys with Command-Shift-R (keyCode 15)")
-        // Register for Command-Shift-R by default
-        hotkeyManager.registerHotkey(keyCode: 15, modifiers: [.command, .shift]) { [weak self] in
-            print("DEBUG: Hotkey callback triggered! ")
+        print("DEBUG: Setting up hotkeys with Option-Shift-T (keyCode 17)")
+        // Register for Option-Shift-T to avoid conflicts with other applications
+        // KeyCode 17 is 'T'
+        hotkeyManager.registerHotkey(keyCode: 17, modifiers: [.option, .shift]) { [weak self] in
+            print("DEBUG: Hotkey callback triggered!")
             self?.toggleRecording()
         }
         print("DEBUG: Hotkey registration complete")
