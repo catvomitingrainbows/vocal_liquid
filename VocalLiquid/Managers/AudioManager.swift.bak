@@ -1,0 +1,220 @@
+import Foundation
+import AVFoundation
+
+/// Singleton manager for handling audio recording with a persistent audio engine
+class AudioManager {
+    // Singleton instance
+    static let shared = AudioManager()
+    
+    // Audio components
+    private let audioEngine = AVAudioEngine()
+    private var inputNode: AVAudioInputNode?
+    private var audioFormat: AVAudioFormat?
+    private var audioSamples: [Float] = []
+    
+    // State tracking
+    private(set) var isRecording = false
+    private var isEngineRunning = false
+    private var isSetup = false
+    
+    // Permission keys
+    private let kMicPermissionCheckedKey = "VocalLiquid.MicPermissionChecked"
+    private let kMicPermissionGrantedKey = "VocalLiquid.MicPermissionGranted"
+    
+    // Logger
+    private let logService = LoggingService()
+    
+    // Private initializer for singleton
+    private init() {
+        // Initial setup of audio components without activating
+        setupAudioComponents()
+        
+        // Request permissions explicitly at startup
+        requestMicrophonePermissionIfNeeded()
+        
+        logService.log(message: "AudioManager initialized with persistent audio engine", level: .info)
+    }
+    
+    // MARK: - Setup
+    
+    /// Set up audio components without activating the engine
+    private func setupAudioComponents() {
+        guard !isSetup else { return }
+        
+        inputNode = audioEngine.inputNode
+        audioFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                  sampleRate: 16000, // Whisper expects 16kHz
+                                  channels: 1,       // Whisper expects mono
+                                  interleaved: false)
+        
+        guard inputNode != nil, audioFormat != nil else {
+            logService.log(message: "Error setting up audio engine components", level: .error)
+            return
+        }
+        
+        isSetup = true
+        logService.log(message: "Audio components setup successfully (engine not running)", level: .info)
+    }
+    
+    // MARK: - Permission Handling
+    
+    /// Check if microphone permission is granted
+    var hasMicrophonePermission: Bool {
+        return UserDefaults.standard.bool(forKey: kMicPermissionGrantedKey)
+    }
+    
+    /// Request microphone permission if needed and not already requested
+    private func requestMicrophonePermissionIfNeeded() {
+        let defaults = UserDefaults.standard
+        
+        // Skip if we've already checked
+        if defaults.bool(forKey: kMicPermissionCheckedKey) {
+            logService.log(message: "Microphone permission already checked, status: \(defaults.bool(forKey: kMicPermissionGrantedKey))", level: .info)
+            return
+        }
+        
+        // Request permission explicitly using AVCaptureDevice API
+        logService.log(message: "Requesting microphone permission explicitly", level: .info)
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            guard let self = self else { return }
+            
+            DispatchQueue.main.async {
+                // Save permission result to UserDefaults
+                defaults.set(true, forKey: self.kMicPermissionCheckedKey)
+                defaults.set(granted, forKey: self.kMicPermissionGrantedKey)
+                defaults.synchronize()
+                
+                if granted {
+                    self.logService.log(message: "Microphone permission granted explicitly", level: .info)
+                } else {
+                    self.logService.log(message: "Microphone permission denied explicitly", level: .warning)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Recording Control
+    
+    /// Start recording audio
+    func startRecording() -> Bool {
+        guard !isRecording else {
+            logService.log(message: "Already recording, ignoring startRecording call", level: .info)
+            return false
+        }
+        
+        // Ensure we have permission before proceeding
+        guard hasMicrophonePermission else {
+            logService.log(message: "Cannot record: Microphone permission not granted", level: .warning)
+            return false
+        }
+        
+        // Reset samples for new recording
+        audioSamples.removeAll()
+        
+        // Only start the engine if not already running
+        if !isEngineRunning {
+            do {
+                audioEngine.prepare()
+                try audioEngine.start()
+                isEngineRunning = true
+                logService.log(message: "Audio engine started successfully", level: .info)
+            } catch {
+                logService.log(message: "Error starting audio engine: \(error.localizedDescription)", level: .error)
+                return false
+            }
+        }
+        
+        // Install tap on input node
+        guard let inputNode = inputNode, let targetFormat = audioFormat else {
+            logService.log(message: "Error: Audio components not available", level: .error)
+            return false
+        }
+        
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        
+        // Install tap to capture audio
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] (buffer, when) in
+            guard let self = self else { return }
+            
+            guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+                self.logService.log(message: "Error creating format converter", level: .error)
+                return
+            }
+            
+            // Calculate capacity for the output buffer
+            let frameCapacity = AVAudioFrameCount(targetFormat.sampleRate * Double(buffer.frameLength) / inputFormat.sampleRate)
+            guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCapacity) else {
+                self.logService.log(message: "Error creating PCM buffer for conversion", level: .error)
+                return
+            }
+            
+            // Set the frame length of the output buffer
+            pcmBuffer.frameLength = frameCapacity
+            
+            var error: NSError? = nil
+            let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            
+            let status = converter.convert(to: pcmBuffer, error: &error, withInputFrom: inputBlock)
+            
+            guard status != .error else {
+                self.logService.log(message: "Error during audio conversion: \(error?.localizedDescription ?? "unknown")", level: .error)
+                return
+            }
+            
+            // Ensure the buffer has float channel data
+            guard let channelData = pcmBuffer.floatChannelData else {
+                self.logService.log(message: "PCM Buffer does not contain float channel data", level: .error)
+                return
+            }
+            
+            // Append converted samples
+            let frameLength = Int(pcmBuffer.frameLength)
+            // Access the first channel (index 0) for mono audio
+            let samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
+            // Append samples
+            self.audioSamples.append(contentsOf: samples)
+        }
+        
+        isRecording = true
+        logService.log(message: "Recording started successfully", level: .info)
+        return true
+    }
+    
+    /// Stop recording audio
+    func stopRecording() {
+        guard isRecording else {
+            logService.log(message: "Not recording, ignoring stopRecording call", level: .info)
+            return
+        }
+        
+        // Remove tap but don't stop the engine
+        inputNode?.removeTap(onBus: 0)
+        
+        isRecording = false
+        logService.log(message: "Recording stopped successfully (engine still running)", level: .info)
+    }
+    
+    /// Get audio samples for transcription
+    func getSamplesForTranscription() -> [Float] {
+        return audioSamples
+    }
+    
+    // MARK: - Cleanup
+    
+    /// Shutdown the audio engine when no longer needed (app termination)
+    func shutdown() {
+        if isRecording {
+            stopRecording()
+        }
+        
+        if isEngineRunning {
+            audioEngine.stop()
+            isEngineRunning = false
+        }
+        
+        logService.log(message: "Audio engine shutdown successfully", level: .info)
+    }
+}

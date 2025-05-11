@@ -1,0 +1,395 @@
+import Cocoa
+import SwiftUI
+
+class StatusBarController {
+    private var statusBar: NSStatusBar
+    private var statusItem: NSStatusItem
+    private var statusBarMenu: NSMenu
+    private var isRecording = false
+
+    // Various services needed
+    private let hotkeyManager = HotkeyManager()
+
+    // Use the singleton AudioManager instead of AudioEngineManager
+    private var audioManager: AudioManager {
+        return AudioManager.shared
+    }
+
+    private let whisperManager = WhisperManager()
+    private let logService = LoggingService()
+
+    init() {
+        print("DEBUG: Initializing StatusBarController")
+
+        // Initialize the status bar and menu
+        statusBar = NSStatusBar.system
+        statusItem = statusBar.statusItem(withLength: NSStatusItem.squareLength)
+        statusBarMenu = NSMenu(title: "Vocal Liquid")
+
+        print("DEBUG: Status bar item created")
+
+        // Configure the status bar icon
+        if let button = statusItem.button {
+            print("DEBUG: Got status item button")
+
+            // Try using SF Symbol first
+            var iconSet = false
+
+            if #available(macOS 11.0, *) {
+                print("DEBUG: macOS 11 or later, trying SF Symbol")
+                if let image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Recording") {
+                    print("DEBUG: Setting waveform image")
+                    button.image = image
+                    iconSet = true
+                } else {
+                    print("DEBUG: Failed to get waveform SF Symbol")
+                }
+            }
+
+            // Fall back to a text-based icon if SF Symbols aren't available
+            if !iconSet {
+                print("DEBUG: Setting fallback emoji icon")
+                button.title = "🎤"
+            }
+
+            // Make sure it's visible with proper positioning
+            button.imagePosition = .imageLeft
+
+            // Force update to ensure visibility
+            button.needsDisplay = true
+        } else {
+            print("ERROR: Failed to get status item button!")
+        }
+
+        logService.log(message: "Status bar button configured", level: .info)
+        logService.log(message: "Status bar controller initialized", level: .info)
+
+        print("DEBUG: Setting up menu, hotkeys, notifications")
+        setupMenu()
+        setupHotkeys()
+        setupNotifications()
+
+        // Force the status bar to update
+        DispatchQueue.main.async {
+            print("DEBUG: Forcing status bar update on main thread")
+            self.statusItem.button?.needsDisplay = true
+        }
+    }
+    
+    private func setupMenu() {
+        // Recording status
+        let recordingStatusItem = NSMenuItem(title: "Not Recording", action: nil, keyEquivalent: "")
+        recordingStatusItem.isEnabled = false
+        statusBarMenu.addItem(recordingStatusItem)
+
+        statusBarMenu.addItem(NSMenuItem.separator())
+
+        // Add recording shortcut info
+        let shortcutItem = NSMenuItem(title: "Shortcut: ⌘⇧R", action: nil, keyEquivalent: "")
+        shortcutItem.isEnabled = false
+        statusBarMenu.addItem(shortcutItem)
+
+        statusBarMenu.addItem(NSMenuItem.separator())
+
+        // Version info
+        let versionItem = NSMenuItem(title: "Vocal Liquid v1.0", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        statusBarMenu.addItem(versionItem)
+
+        statusBarMenu.addItem(NSMenuItem.separator())
+
+        // Add a force reset icon option
+        statusBarMenu.addItem(NSMenuItem(title: "Force Reset Icon", action: #selector(forceResetIcon), keyEquivalent: "r"))
+
+        statusBarMenu.addItem(NSMenuItem.separator())
+
+        // Quit
+        statusBarMenu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        // Set the menu for the status item
+        statusItem.menu = statusBarMenu
+
+        // Log menu setup
+        logService.log(message: "Status bar menu setup complete", level: .info)
+    }
+    
+    private func setupHotkeys() {
+        // Register for Command-Shift-R by default
+        hotkeyManager.registerHotkey(keyCode: 15, modifiers: [.command, .shift]) { [weak self] in
+            self?.toggleRecording()
+        }
+    }
+    
+    private func setupNotifications() {
+        // Listen for notifications from the audio manager and whisper service
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(updateRecordingStatus(_:)),
+            name: Notification.Name("RecordingStatusChanged"),
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTranscriptionComplete(_:)),
+            name: Notification.Name("TranscriptionComplete"),
+            object: nil
+        )
+    }
+    
+    private func toggleRecording() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+    
+    private func startRecording() {
+        logService.log(message: "Starting recording", level: .info)
+        
+        // First check if we have microphone permission before attempting to record
+        if !audioManager.hasMicrophonePermission {
+            logService.log(message: "Cannot start recording: No microphone permission", level: .warning)
+            
+            // Show an error in the menu to indicate why recording failed
+            if let recordingStatusItem = statusBarMenu.item(at: 0) {
+                recordingStatusItem.title = "Cannot Record: No Permission"
+            }
+            
+            return
+        }
+
+        // Start the audio recording first - only update UI if successful
+        let success = audioManager.startRecording()
+
+        if success {
+            isRecording = true
+
+            // Update status bar icon to show recording state
+            if let button = statusItem.button {
+                if #available(macOS 11.0, *) {
+                    if let image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: "Recording Active") {
+                        button.image = image
+                        button.contentTintColor = .systemRed
+                    }
+                } else {
+                    // Fallback for older macOS
+                    button.title = "🔴"
+                }
+                
+                // Force update
+                button.needsDisplay = true
+            }
+
+            // Update menu
+            if let recordingStatusItem = statusBarMenu.item(at: 0) {
+                recordingStatusItem.title = "Recording..."
+            }
+
+            // Post notification that recording has started
+            NotificationCenter.default.post(
+                name: Notification.Name("RecordingStatusChanged"),
+                object: nil,
+                userInfo: ["isRecording": true]
+            )
+        } else {
+            logService.log(message: "Failed to start recording", level: .error)
+            
+            // Update menu to show error
+            if let recordingStatusItem = statusBarMenu.item(at: 0) {
+                recordingStatusItem.title = "Failed to Start Recording"
+            }
+        }
+    }
+    
+    private func stopRecording() {
+        DEBUG_LOG("Stopping recording - START")
+        logService.log(message: "Stopping recording", level: .info)
+
+        // First, update UI to show we're stopping
+        isRecording = false
+        
+        // ENHANCED: Guarantee the icon updates correctly by refreshing status item button
+        self.enhancedForceResetIcon()
+        
+        // Schedule another icon reset in 100ms in case the first one doesn't take
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.forceResetIcon()
+        }
+
+        // Update menu
+        if let recordingStatusItem = statusBarMenu.item(at: 0) {
+            recordingStatusItem.title = "Transcribing..."
+        }
+
+        // Stop the audio recording
+        audioManager.stopRecording()
+        
+        // Post notification that recording has stopped
+        NotificationCenter.default.post(
+            name: Notification.Name("RecordingStatusChanged"),
+            object: nil,
+            userInfo: ["isRecording": false]
+        )
+
+        // Get the audio samples for transcription
+        let samples = audioManager.getSamplesForTranscription()
+
+        // Check if we have samples
+        if samples.isEmpty {
+            if let recordingStatusItem = statusBarMenu.item(at: 0) {
+                recordingStatusItem.title = "Not Recording"
+            }
+            logService.log(message: "No audio samples collected", level: .warning)
+            return
+        }
+
+        // Transcribe the audio
+        whisperManager.transcribeAudio(samples: samples) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+
+                if let recordingStatusItem = self.statusBarMenu.item(at: 0) {
+                    recordingStatusItem.title = "Not Recording"
+                }
+
+                // Ensure icon is reset after transcription completes
+        self.enhancedForceResetIcon()
+
+                switch result {
+                case .success(let transcription):
+                    self.copyToClipboard(text: transcription)
+                    self.logService.log(message: "Transcription complete", level: .info)
+                    
+                    // Post notification for transcription completion
+                    NotificationCenter.default.post(
+                        name: Notification.Name("TranscriptionComplete"),
+                        object: nil,
+                        userInfo: ["transcription": transcription]
+                    )
+
+                case .failure(let error):
+                    self.logService.log(message: "Transcription error: \(error.localizedDescription)", level: .error)
+                    
+                    // Post notification for transcription failure
+                    DEBUG_LOG("Recording fully stopped and transcription complete")
+                    NotificationCenter.default.post(
+                        name: Notification.Name("TranscriptionFailed"),
+                        object: nil,
+                        userInfo: ["error": error.localizedDescription]
+                    )
+                }
+                
+                // Reset icon again after completion, just to be extra sure
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    self?.forceResetIcon()
+                }
+            }
+        }
+    }
+    
+    // ADDED: Dedicated method to reset the status bar icon to normal state 
+    @objc private func forceResetIcon() {
+        DEBUG_LOG("Explicitly resetting status bar icon - START")
+        guard let button = statusItem.button else {
+            return
+        }
+        
+        logService.log(message: "Explicitly resetting status bar icon", level: .info)
+        
+        // Try multiple approaches to reset the icon
+        
+        // 1. Reset image and tint for macOS 11+
+        if #available(macOS 11.0, *) {
+            if let image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Voice Recording") {
+                button.image = image
+                button.contentTintColor = nil
+            }
+        } else {
+            // 2. Fallback for older macOS
+            button.title = "🎤"
+        }
+        
+        // 3. Explicitly clear any highlight state
+        button.isHighlighted = false
+        
+        // 4. Explicitly clear any possible tint
+        button.contentTintColor = nil
+        
+        // 5. Force redraw
+        button.needsDisplay = true
+        
+        // 6. Update parent view
+        button.superview?.needsDisplay = true
+        
+        // 7. Extra forceful approach
+        button.layer?.backgroundColor = nil
+        
+        // 8. Log that we did this
+        print("ICON: Reset status bar icon - button.contentTintColor is now nil")
+        DEBUG_LOG("Explicitly resetting status bar icon - COMPLETE")
+    }
+    
+    private func copyToClipboard(text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        logService.log(message: "Copied transcription to clipboard", level: .info)
+    }
+    
+    @objc private func updateRecordingStatus(_ notification: Notification) {
+        // Handle recording status change notification from other components
+        if let isRec = notification.userInfo?["isRecording"] as? Bool {
+            logService.log(message: "Received recording status change notification: \(isRec)", level: .info)
+            
+            // Only update UI if our internal state doesn't match
+            if isRec != isRecording {
+                isRecording = isRec
+                
+                // Update UI
+                if isRec {
+                    // Update to recording state - icon and menu
+                    if let button = statusItem.button {
+                        if #available(macOS 11.0, *) {
+                            if let image = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: "Recording Active") {
+                                button.image = image
+                                button.contentTintColor = .systemRed
+                            }
+                        } else {
+                            button.title = "🔴"
+                        }
+                        button.needsDisplay = true
+                    }
+                    
+                    if let recordingStatusItem = statusBarMenu.item(at: 0) {
+                        recordingStatusItem.title = "Recording..."
+                    }
+                } else {
+                    // Update to stopped state using our dedicated method
+                    forceResetIcon()
+                    
+                    // Also schedule another reset after a delay to ensure it takes effect
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        self?.forceResetIcon()
+                    }
+                    
+                    if let recordingStatusItem = statusBarMenu.item(at: 0) {
+                        recordingStatusItem.title = "Not Recording"
+                    }
+                }
+            }
+        }
+    }
+    
+    @objc private func handleTranscriptionComplete(_ notification: Notification) {
+        guard let transcription = notification.userInfo?["transcription"] as? String else {
+            return
+        }
+        
+        // Make sure icon is reset when transcription completes
+        forceResetIcon()
+        
+        logService.log(message: "Transcription completed: \(transcription.prefix(50))...", level: .info)
+    }
+}

@@ -1,0 +1,349 @@
+import SwiftUI
+import AppKit
+import UserNotifications
+import AVFoundation
+
+@main
+struct VocalLiquidApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
+    var body: some Scene {
+        // We don't need any visible windows since this is a background-only app
+        Settings {
+            EmptyView()
+        }
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    // Replace StatusBarController with direct hotkey manager and transcription components
+    private var hotkeyManager: HotkeyManager?
+    private var whisperManager: WhisperManager?
+    private var isRecording = false
+    private let logger = LoggingService()
+
+    // Using the singleton AudioManager instead of creating a new instance
+    private var audioManager: AudioManager {
+        return AudioManager.shared
+    }
+
+    // UserDefaults keys for persistent notification permission tracking
+    private let kNotificationPermissionCheckedKey = "VocalLiquid.NotificationPermissionChecked"
+    private let kNotificationPermissionGrantedKey = "VocalLiquid.NotificationPermissionGranted"
+    private let kNotificationsShownKey = "VocalLiquid.NotificationsShown"
+    private var notificationsShown: Set<String> = []  // Track shown notifications by type
+    private let maxNotificationsPerSession = 5  // Limit total notifications
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Create the logger first
+        logger.log(message: "VocalLiquid application started", level: .info)
+        print("VocalLiquid started as background application")
+
+        // First, check existing permission status for debugging
+        print("Permission status at startup:")
+        let defaults = UserDefaults.standard
+        print("Notification permission checked: \(defaults.bool(forKey: kNotificationPermissionCheckedKey))")
+        print("Notification permission granted: \(defaults.bool(forKey: kNotificationPermissionGrantedKey))")
+
+        // Force permissions to be granted for testing
+        defaults.set(true, forKey: kNotificationPermissionCheckedKey)
+        defaults.set(true, forKey: kNotificationPermissionGrantedKey)
+        defaults.synchronize()
+        print("Permissions forced to granted")
+
+        // Clear old notification tracking data
+        // This helps prevent accumulation of old notification types between app launches
+        // but keeps the permission status
+        UserDefaults.standard.set([String](), forKey: kNotificationsShownKey)
+        notificationsShown.removeAll()
+
+        // Set up notification support
+        setupNotifications()
+
+        // Initialize managers directly instead of using StatusBarController
+        print("Initializing managers...")
+        whisperManager = WhisperManager()
+        // AudioManager is automatically initialized as singleton
+        print("AudioManager singleton is ready: \(AudioManager.shared.hasMicrophonePermission ? "Has permission" : "No permission")")
+
+        // Set up hotkey manager
+        print("Setting up hotkey...")
+        hotkeyManager = HotkeyManager()
+        hotkeyManager?.registerHotkey(keyCode: 15, modifiers: [.command, .shift]) { [weak self] in
+            self?.toggleRecording()
+        }
+
+        // Double-check permission status after initialization
+        print("Permission status after initialization:")
+        print("Notification permission checked: \(defaults.bool(forKey: kNotificationPermissionCheckedKey))")
+        print("Notification permission granted: \(defaults.bool(forKey: kNotificationPermissionGrantedKey))")
+
+        // Hide the dock icon since this is a background app
+        NSApp.setActivationPolicy(.prohibited) // Most invisible mode
+
+        // Prevent the app from showing any windows at launch
+        for window in NSApplication.shared.windows {
+            window.close()
+        }
+
+        // Show launch notification (only once per session)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // Only show the notification if we've never shown it before in this session
+            if !self.notificationsShown.contains("app_launch") {
+                self.showNotification(
+                    title: "VocalLiquid Ready",
+                    body: "Press Command-Shift-R to start/stop recording.",
+                    type: "app_launch"
+                )
+            }
+            print("VocalLiquid is running in background mode")
+            self.logger.log(message: "VocalLiquid ready - using Command-Shift-R hotkey", level: .info)
+        }
+    }
+    
+    func applicationWillTerminate(_ aNotification: Notification) {
+        // Clean up resources
+        logger.log(message: "VocalLiquid application will terminate", level: .info)
+
+        // Proper shutdown of audio engine
+        AudioManager.shared.shutdown()
+    }
+    
+    // Setup notifications with persistent permissions
+    private func setupNotifications() {
+        let defaults = UserDefaults.standard
+
+        print("AppDelegate: Setting up notifications")
+
+        // Load the list of already shown notifications from UserDefaults
+        if let shownArray = defaults.stringArray(forKey: kNotificationsShownKey) {
+            notificationsShown = Set(shownArray)
+            print("AppDelegate: Loaded \(notificationsShown.count) notification types from UserDefaults")
+            logger.log(message: "Loaded \(notificationsShown.count) notification types from UserDefaults", level: .info)
+        }
+
+        // If we've already checked permissions, don't request again
+        if defaults.bool(forKey: kNotificationPermissionCheckedKey) {
+            let granted = defaults.bool(forKey: kNotificationPermissionGrantedKey)
+            print("AppDelegate: Using saved notification permission: \(granted)")
+            logger.log(message: "Using saved notification permission result: \(granted)", level: .info)
+            return
+        }
+
+        print("AppDelegate: Requesting notification permissions for the first time")
+        logger.log(message: "Requesting notification permissions", level: .info)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { [weak self] granted, error in
+            guard let self = self else { return }
+
+            print("AppDelegate: Notification permission request completed with result: \(granted)")
+
+            let defaults = UserDefaults.standard
+            defaults.set(true, forKey: self.kNotificationPermissionCheckedKey)
+            defaults.set(granted, forKey: self.kNotificationPermissionGrantedKey)
+            defaults.synchronize() // Force synchronize
+
+            print("AppDelegate: Notification permission saved, current status:")
+            print("Notification permission checked: \(defaults.bool(forKey: self.kNotificationPermissionCheckedKey))")
+            print("Notification permission granted: \(defaults.bool(forKey: self.kNotificationPermissionGrantedKey))")
+
+            if granted {
+                self.logger.log(message: "Notification permission granted", level: .info)
+            } else if let error = error {
+                self.logger.log(message: "Notification permission error: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+    
+    // Show a notification with deduplication and rate limiting
+    private func showNotification(title: String, body: String, type: String? = nil, force: Bool = false) {
+        let defaults = UserDefaults.standard
+
+        // Skip if notification permission not granted
+        if defaults.bool(forKey: kNotificationPermissionCheckedKey) &&
+           !defaults.bool(forKey: kNotificationPermissionGrantedKey) {
+            logger.log(message: "Skipping notification - permission not granted", level: .info)
+            return
+        }
+
+        // Deduplicate notifications by type if type is provided
+        if let type = type, !force {
+            // If we've already shown this type of notification and it's not forced, skip it
+            if notificationsShown.contains(type) {
+                logger.log(message: "Skipping duplicate notification of type: \(type)", level: .info)
+                return
+            }
+            // Mark this notification type as shown
+            notificationsShown.insert(type)
+
+            // Save to UserDefaults for persistence
+            defaults.set(Array(notificationsShown), forKey: kNotificationsShownKey)
+        }
+
+        // Check if we're within our notification limit
+        // Critical notifications (force=true) always get shown
+        if !force && notificationsShown.count > maxNotificationsPerSession {
+            logger.log(message: "Notification limit reached. Skipping notification: \(title)", level: .info)
+            return
+        }
+
+        logger.log(message: "Showing notification: \(title)", level: .info)
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = UNNotificationSound.default
+
+        // Use a consistent identifier for notifications of the same type to replace
+        // any existing notification of that type
+        let identifier = type ?? UUID().uuidString
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+
+        // Remove pending notifications to avoid overwhelming the user
+        if !force && identifier != "recording_status" {
+            UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        }
+    }
+    
+    // Toggle recording functionality (moved from StatusBarController)
+    private func toggleRecording() {
+        print("Toggle recording called...")
+        print("Permission status before recording toggle:")
+        let defaults = UserDefaults.standard
+        print("Notification permission checked: \(defaults.bool(forKey: kNotificationPermissionCheckedKey))")
+        print("Notification permission granted: \(defaults.bool(forKey: kNotificationPermissionGrantedKey))")
+
+        // Clear any previous recording-related notification types
+        // to ensure users always get feedback on recording actions
+        clearNotificationType("recording_status")
+
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+
+        // Check permission status after toggle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            print("Permission status after recording toggle:")
+            let defaults = UserDefaults.standard
+            print("Notification permission checked: \(defaults.bool(forKey: self.kNotificationPermissionCheckedKey))")
+            print("Notification permission granted: \(defaults.bool(forKey: self.kNotificationPermissionGrantedKey))")
+        }
+    }
+    
+    private func startRecording() {
+        guard !isRecording else { return }
+
+        // Check if we have microphone permission first
+        if !audioManager.hasMicrophonePermission {
+            // Cannot record without permission, show notification instead
+            showNotification(
+                title: "Permission Required",
+                body: "Microphone permission is needed for recording. Please grant permission in System Settings.",
+                type: "permission_required",
+                force: true
+            )
+            logger.log(message: "Cannot start recording: microphone permission not granted", level: .warning)
+            return
+        }
+
+        logger.log(message: "Starting recording", level: .info)
+
+        // Start recording first, only set isRecording if successful
+        let success = audioManager.startRecording()
+
+        if success {
+            isRecording = true
+
+            // Show notification - force this one to always show as it's part of core functionality
+            showNotification(
+                title: "Recording Started",
+                body: "Speak now. Press Command-Shift-R to stop.",
+                type: "recording_status",
+                force: true
+            )
+        } else {
+            // Show error notification
+            showNotification(
+                title: "Recording Failed",
+                body: "Could not start recording. Please try again.",
+                type: "recording_error",
+                force: true
+            )
+            logger.log(message: "Failed to start recording", level: .error)
+        }
+    }
+    
+    private func stopRecording() {
+        guard let whisperManager = whisperManager, isRecording else { return }
+
+        logger.log(message: "Stopping recording", level: .info)
+        isRecording = false
+
+        // Show notification - use the same type to replace previous recording status
+        showNotification(
+            title: "Recording Stopped",
+            body: "Transcribing audio...",
+            type: "recording_status",
+            force: true
+        )
+
+        // Stop recording
+        audioManager.stopRecording()
+
+        // Get audio samples and transcribe
+        let samples = audioManager.getSamplesForTranscription()
+        
+        whisperManager.transcribeAudio(samples: samples) { [weak self] result in
+            guard let self = self else { return }
+            
+            switch result {
+            case .success(let transcription):
+                self.copyToClipboard(text: transcription)
+                self.showNotification(
+                    title: "Transcription Complete",
+                    body: "Text copied to clipboard: \(transcription.prefix(50))...",
+                    type: "transcription_result",
+                    force: true  // Always show transcription results
+                )
+                self.logger.log(message: "Transcription complete", level: .info)
+
+            case .failure(let error):
+                self.showNotification(
+                    title: "Transcription Failed",
+                    body: "Error: \(error.localizedDescription)",
+                    type: "transcription_error",
+                    force: true  // Always show errors
+                )
+                self.logger.log(message: "Transcription error: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+    
+    private func copyToClipboard(text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    // Helper to clear notification tracking for specific types
+    private func clearNotificationType(_ type: String) {
+        notificationsShown.remove(type)
+
+        // Persist changes to UserDefaults
+        UserDefaults.standard.set(Array(notificationsShown), forKey: kNotificationsShownKey)
+
+        logger.log(message: "Cleared notification type: \(type)", level: .info)
+    }
+
+    // Clear all notification tracking
+    private func clearAllNotificationTypes() {
+        notificationsShown.removeAll()
+
+        // Persist changes to UserDefaults
+        UserDefaults.standard.set(Array(notificationsShown), forKey: kNotificationsShownKey)
+
+        logger.log(message: "Cleared all notification types", level: .info)
+    }
+}
