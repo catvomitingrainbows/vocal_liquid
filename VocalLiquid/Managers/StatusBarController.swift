@@ -445,7 +445,6 @@ class StatusBarController {
         
         logService.log(message: "Transcription completed: \(transcription.prefix(50))...", level: .info)
     }
-
     // Enhanced version that goes straight to nuclear option
     @objc func enhancedForceResetIcon() {
         // Skip gentle approach, go straight to nuclear option since we know it works
