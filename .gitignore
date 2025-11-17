@@ -43,3 +43,7 @@ Carthage/Build/
 *.swiftmodule
 *.swiftsourceinfo
 *.abi.json
+
+# Model files (too large for GitHub)
+*.bin
+VocalLiquid/Resources/*.bin
