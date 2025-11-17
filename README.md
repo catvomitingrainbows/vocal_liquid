@@ -87,8 +87,14 @@ This project is structured as follows:
 ### Building from Source
 
 1. Clone the repository
-2. Open `VocalLiquid.xcodeproj` in Xcode
-3. Build and run the project
+2. Download the Whisper model file:
+   - Download `ggml-base.en.bin` from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin)
+   - Place it in `VocalLiquid/Resources/ggml-base.en.bin`
+   - **Note**: This file is ~141MB and is not included in the repository
+3. Open `VocalLiquid.xcodeproj` in Xcode
+4. Build and run the project
+
+**Important**: The model file (`ggml-base.en.bin`) is required for transcription to work. Without it, the app will not be able to process audio recordings.
 
 ## License
 
