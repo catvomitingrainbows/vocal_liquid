@@ -47,3 +47,7 @@ Carthage/Build/
 # Model files (too large for GitHub)
 *.bin
 VocalLiquid/Resources/*.bin
+
+# Frameworks (should be built locally or managed via SPM/CocoaPods)
+VocalLiquid/whisper.xcframework/
+*.xcframework/
